@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>
+      Voice Analysis Proxy
+    </title>
+  </head>
+  <body>
+    <script type="text/javascript">
+        var params = JSON.parse('<%- params %>');
+        console.warn('voiceanalysisproxy - params: ', params);
+        var ltng_origin = params.ltng_origin;
+        var ltng_url = params.ltng_url;
+        var _uid = params.ltng_uid;
+        var visualSetting = params.visual_setting || 'sinewave';
+        
+        var _busy = false;
+
+        console.warn('voiceanalysisproxy - ltng_origin: ', ltng_origin);
+        console.warn('voiceanalysisproxy - ltng_url: ', ltng_url);
+        console.warn('voiceanalysisproxy - _uid: ', _uid);
+        console.warn('voiceanalysisproxy - visualSetting: ', visualSetting);
+
+        
+        window.addEventListener("message", messageHandler, true);
+        var json = JSON.stringify({type: "ready", uid: _uid});
+        var target = ltng_origin;
+        if (window.parent && window.parent.postMessage && target !== null && target !== '') {
+            window.parent.postMessage(json, target);
+        }
+            
+        function messageHandler(event) {
+            //console.warn('event.origin: ', event.origin);
+            //console.warn('event.data: ', event.data);
+            if (event.origin === ltng_origin) {
+                event.preventDefault();
+                event.stopPropagation();
+                
+                var data = JSON.parse(event.data);
+                var type = data.type;
+                var uid = data.uid;
+                
+                console.warn('data: ', data.type, data.uid);
+                
+                if (type === 'startDictation' && _uid === uid) {
+                    startDictation(data.config);
+                } else if (type === 'stopDictation' && _uid === uid) {
+                    stopDictation(data.config);
+                } else if (type === 'speak' && _uid === uid) {
+                    speak(data.config);
+                } else if (type === 'getVoices' && _uid === uid) {
+                    getVoices(data.config);
+                } else if (type === 'getByteTimeDomainData' && _uid === uid) {
+                    getByteTimeDomainData(data.config);
+                }
+            }
+        }
+                
+        // Older browsers might not implement mediaDevices at all, so we set an empty object first
+        if (navigator.mediaDevices === undefined) {
+          navigator.mediaDevices = {};
+        }
+        
+        
+        // Some browsers partially implement mediaDevices. We can't just assign an object
+        // with getUserMedia as it would overwrite existing properties.
+        // Here, we will just add the getUserMedia property if it's missing.
+        if (navigator.mediaDevices.getUserMedia === undefined) {
+          navigator.mediaDevices.getUserMedia = function(constraints) {
+        
+            // First get ahold of the legacy getUserMedia, if present
+            var getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+        
+            // Some browsers just don't implement it - return a rejected promise with an error
+            // to keep a consistent interface
+            if (!getUserMedia) {
+              return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+            }
+        
+            // Otherwise, wrap the call to the old navigator.getUserMedia with a Promise
+            return new Promise(function(resolve, reject) {
+              getUserMedia.call(navigator, constraints, resolve, reject);
+            });
+          }
+        }
+        
+        
+        
+        // set up forked web audio context, for multiple browsers
+        // window. is needed otherwise Safari explodes
+        
+        var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        var voiceSelect = null;
+        var source;
+        var stream;
+        
+        // grab the mute button to use below
+        
+        //var mute = document.querySelector('.mute');
+        
+        //set up the different audio nodes we will use for the app
+        
+        var analyser = audioCtx.createAnalyser();
+        analyser.minDecibels = -90;
+        analyser.maxDecibels = -10;
+        analyser.smoothingTimeConstant = 0.85;
+
+        var distortion = audioCtx.createWaveShaper();
+        var gainNode = audioCtx.createGain();
+        var biquadFilter = audioCtx.createBiquadFilter();
+        var convolver = audioCtx.createConvolver();
+        
+        // distortion curve for the waveshaper, thanks to Kevin Ennis
+        // http://stackoverflow.com/questions/22312841/waveshaper-node-in-webaudio-how-to-emulate-distortion
+        
+        function makeDistortionCurve(amount) {
+          var k = typeof amount === 'number' ? amount : 50,
+            n_samples = 44100,
+            curve = new Float32Array(n_samples),
+            deg = Math.PI / 180,
+            i = 0,
+            x;
+          for ( ; i < n_samples; ++i ) {
+            x = i * 2 / n_samples - 1;
+            curve[i] = ( 3 + k ) * x * 20 * deg / ( Math.PI + k * Math.abs(x) );
+          }
+          return curve;
+        };
+                
+        if (navigator.mediaDevices.getUserMedia) {
+           var constraints = {audio: true}
+           navigator.mediaDevices.getUserMedia (constraints)
+              .then(
+                function(stream) {
+                   source = audioCtx.createMediaStreamSource(stream);
+                   source.connect(analyser);
+                   analyser.connect(distortion);
+                   distortion.connect(biquadFilter);
+                   biquadFilter.connect(convolver);
+                   convolver.connect(gainNode);
+                   gainNode.connect(audioCtx.destination);
+        
+                   analyze();
+              })
+              .catch( function(err) { console.log('The following gUM error occured: ' + err);})
+        } else {
+           console.log('getUserMedia not supported on your browser!');
+        }
+        
+        
+        function getBuffer() {
+            console.warn('getBuffer');
+            analyser.getByteTimeDomainData(dataArray);
+            console.warn('dataArray: ', dataArray);
+            for(var i = 0; i < bufferLength; i++) {
+                var v = dataArray[i] / 128.0;
+                console.warn(i, v);    
+            }
+            
+        }
+
+        var bufferLength = null;
+        var dataArray = null;
+        var bufferLengthAlt = null;
+        var dataArrayAlt = null;
+        
+          
+        function analyze() {
+            //var visualSetting = config.visualSetting || 'sinewave';
+            //var visualSetting = 'sinewave';
+            
+            if (visualSetting === 'sinewave') {
+                analyser.fftSize = 2048;
+                bufferLength = analyser.fftSize;
+                console.log('bufferLength: ', bufferLength);
+                dataArray = new Uint8Array(bufferLength);
+                
+                analyser.getByteTimeDomainData(dataArray);
+                
+                                 
+            } else if (visualSetting === 'frequencybars') {    
+                analyser.fftSize = 256;
+                bufferLengthAlt = analyser.frequencyBinCount;
+                //console.warn('bufferLengthAlt: ', bufferLengthAlt);
+                dataArrayAlt = new Uint8Array(bufferLengthAlt);
+                
+                analyser.getByteFrequencyData(dataArrayAlt);                
+            }
+        
+            //console.warn('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ dataArray: ',typeof dataArray, dataArray);
+            //console.warn('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ dataArrayAlt: ',typeof dataArrayAlt, dataArrayAlt);  
+        
+        }
+        
+        function getByteTimeDomainData(config) {
+            if (_busy === true) {
+              return;
+            }
+            //console.warn('voiceProxy.getByteTimeDomainData: ', config);
+
+            //var visualSetting = config.visualSetting || 'sinewave';
+
+            console.warn('voiceProxy.getByteTimeDomainData - visualSetting: ', visualSetting);
+            
+            //console.warn('dataArray: ',typeof dataArray, dataArray)  
+            if (visualSetting === 'sinewave') {
+                analyser.getByteTimeDomainData(dataArray);                
+                                 
+            } else if (visualSetting === 'frequencybars') {    
+                analyser.getByteFrequencyData(dataArrayAlt); 
+            }
+                       
+                                    
+            var response = {
+                source: 'AudioAnalyzer',                    
+                dataArray: visualSetting === 'sinewave' ? dataArray : dataArrayAlt,
+                bufferLength: visualSetting === 'sinewave' ? bufferLength : bufferLengthAlt,
+                config: config
+            };
+                             
+            var json = JSON.stringify({type: "response", uid: _uid, response: response});
+            console.warn('voiceProxy sending json: ', json.length, json);
+            window.parent.postMessage(json, ltng_origin);        
+        }
+  
+    </script>
+  </body>
+</html>
